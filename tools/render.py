@@ -84,14 +84,17 @@ class Timeline:
             t += s["e"] - s["s"]
         self.duration = t
 
-    def map(self, src, snap="nearest"):
+    def map(self, src, end=False):
         for s, e, o in self.segs:
             if s <= src <= e:
                 return o + (src - s)
-        # src falls in a removed gap: snap to the next kept segment start
+        # src falls in a removed gap: a start snaps forward to the next kept
+        # segment, an end snaps back to the previous one
+        prev = 0.0
         for s, e, o in self.segs:
             if src < s:
-                return o
+                return prev if end else o
+            prev = o + (e - s)
         return self.duration
 
 
@@ -114,7 +117,7 @@ def build_ass(plan, tl):
     # ---- Hook title (visible on the very first frame: also works as cover)
     hook_end = 0.0
     if hook:
-        hook_end = hook["dur"]
+        hook_end = tl.map(hook["end"]) if "end" in hook else hook["dur"]
         lines = hook["lines"]  # list of (text, size, colour-key)
         heights = [l["size"] * 1.18 for l in lines]
         box_h = sum(heights) + 70
@@ -135,7 +138,7 @@ def build_ass(plan, tl):
     tip_times = [(tl.map(t["at"]), t) for t in tips]
     for i, (t0, tip) in enumerate(tip_times):
         t_next = tip_times[i + 1][0] if i + 1 < len(tip_times) else (
-            tl.map(end_card["at"]) if end_card else dur)
+            tl.map(plan["outro_at"]) if "outro_at" in plan else dur)
         card_end = min(t0 + tip.get("card_dur", 2.6), t_next)
         # card
         cy = plan.get("tip_card_y", 380)
@@ -172,7 +175,7 @@ def build_ass(plan, tl):
     sub_y = plan.get("sub_y", 1330)
     fs = plan.get("sub_size", 60)
     for cue in plan.get("cues", []):
-        t0, t1 = tl.map(cue["s"]), tl.map(cue["e"])
+        t0, t1 = tl.map(cue["s"]), tl.map(cue["e"], end=True)
         if cue.get("hide"):
             continue
         text = cue["text"]
@@ -257,20 +260,27 @@ def build_graph(plan, ass_path, af_chain, audio_only=False):
     fcx, fcy = plan.get("focus", [0.45, 0.45])
     parts = []
     labels = []
-    edge = 0.012  # short audio fades at every cut to avoid clicks
-    for i, s in enumerate(plan["segments"]):
+    edge = 0.012  # short audio fades where a pause was removed, to avoid clicks
+    segs = plan["segments"]
+    for i, s in enumerate(segs):
         z = s.get("zoom", 1.0)
         cw, ch, x, y = crop_for_zoom(z, src_w, src_h, fcx, fcy)
         d = s["e"] - s["s"]
         if not audio_only:
             parts.append(
-                f"[0:v]trim=start={s['s']:.3f}:end={s['e']:.3f},setpts=PTS-STARTPTS,"
+                # bounds sit on frame times; the small offset keeps float
+                # rounding from adding or dropping a frame
+                f"[0:v]trim=start={max(0, s['s'] - 0.005):.4f}:end={s['e'] - 0.005:.4f},setpts=PTS-STARTPTS,"
                 f"crop={cw}:{ch}:{x}:{y},scale={W}:{H}:flags=lanczos,setsar=1[v{i}]")
+        fades = ""
+        if i > 0 and s["s"] > segs[i - 1]["e"] + 1e-3:
+            fades += f",afade=t=in:d={edge}"
+        if i + 1 < len(segs) and segs[i + 1]["s"] > s["e"] + 1e-3:
+            fades += f",afade=t=out:st={max(0, d - edge):.3f}:d={edge}"
         parts.append(
-            f"[0:a]atrim=start={s['s']:.3f}:end={s['e']:.3f},asetpts=PTS-STARTPTS,"
-            f"afade=t=in:d={edge},afade=t=out:st={max(0, d - edge):.3f}:d={edge}[a{i}]")
+            f"[0:a]atrim=start={s['s']:.4f}:end={s['e']:.4f},asetpts=PTS-STARTPTS{fades}[a{i}]")
         labels.append(f"[a{i}]" if audio_only else f"[v{i}][a{i}]")
-    n = len(plan["segments"])
+    n = len(segs)
     if audio_only:
         parts.append(f"{''.join(labels)}concat=n={n}:v=0:a=1,{af_chain}[aout]")
         return ";\n".join(parts)
@@ -327,7 +337,7 @@ def main():
     af = loudnorm_chain(plan)
     graph = build_graph(plan, ass_path, af)
     enc = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"] if preview else
-           ["-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
+           ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high",
             "-level:v", "4.2", "-g", "60", "-bf", "2"])
     cmd = (["ffmpeg", "-hide_banner", "-y", "-i", plan["source"], "-filter_complex", graph,
             "-map", "[vout]", "-map", "[aout]", "-r", str(FPS)] + enc +
