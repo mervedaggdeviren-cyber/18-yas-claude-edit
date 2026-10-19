@@ -255,7 +255,7 @@ def crop_for_zoom(z, src_w, src_h, cx, cy):
     return cw, ch, int(x), int(y)
 
 
-def build_graph(plan, ass_path, af_chain, audio_only=False):
+def build_graph(plan, ass_path, af_chain, audio_only=False, tl=None):
     src_w, src_h = plan["src_w"], plan["src_h"]
     fcx, fcy = plan.get("focus", [0.45, 0.45])
     parts = []
@@ -300,7 +300,20 @@ def build_graph(plan, ass_path, af_chain, audio_only=False):
     a = f"[ac]{af_chain}"
     if tail:
         a += f",apad=pad_dur={tail}"
-    parts.append(a + "[aout]")
+    sfx = plan.get("sfx", [])
+    if not sfx:
+        parts.append(a + "[aout]")
+        return ";\n".join(parts)
+    # transition sounds: input k+1 is sfx[k]; placed on the edited timeline
+    parts.append(a + "[speech]")
+    mix = "[speech]"
+    for k, fx in enumerate(sfx):
+        t = max(0.0, tl.map(fx["at"]) + fx.get("offset", 0.0))
+        ms = int(round(t * 1000))
+        parts.append(f"[{k + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+                     f"volume={fx.get('gain_db', -20)}dB,adelay={ms}|{ms}[fx{k}]")
+        mix += f"[fx{k}]"
+    parts.append(f"{mix}amix=inputs={len(sfx) + 1}:normalize=0:duration=first[aout]")
     return ";\n".join(parts)
 
 
@@ -335,11 +348,12 @@ def main():
         with open(plan["ass_copy"], "w", encoding="utf-8") as f:
             f.write(build_ass(plan, tl))
     af = loudnorm_chain(plan)
-    graph = build_graph(plan, ass_path, af)
+    graph = build_graph(plan, ass_path, af, tl=tl)
+    fx_inputs = [x for fx in plan.get("sfx", []) for x in ("-i", fx["file"])]
     enc = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"] if preview else
            ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high",
             "-level:v", "4.2", "-g", "60", "-bf", "2"])
-    cmd = (["ffmpeg", "-hide_banner", "-y", "-i", plan["source"], "-filter_complex", graph,
+    cmd = (["ffmpeg", "-hide_banner", "-y", "-i", plan["source"]] + fx_inputs + ["-filter_complex", graph,
             "-map", "[vout]", "-map", "[aout]", "-r", str(FPS)] + enc +
            ["-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709",
             "-color_trc", "bt709", "-color_range", "tv",

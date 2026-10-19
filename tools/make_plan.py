@@ -4,7 +4,9 @@
 Edit decisions live here; the word-level transcript lives in
 edit/transcript_tr.json (Whisper output, proof-read by hand).
 
-Usage: make_plan.py SOURCE.mp4 OUT_plan.json
+Usage: make_plan.py SOURCE.mp4 OUT_plan.json [SFX_DIR]
+  With SFX_DIR (output of make_sfx.py) the plan also places a soft whoosh on
+  every tip card and a soft pop on the end card.
 """
 import json
 import os
@@ -178,6 +180,13 @@ def main():
         "sub_y": 1330,
         "cues": cues(words),
     }
+    if len(sys.argv) > 3:
+        fx_dir = sys.argv[3]
+        # the whoosh swell peaks 0.30 s in, so start it just before the card lands
+        plan["sfx"] = [{"file": os.path.join(fx_dir, "whoosh.wav"), "at": t,
+                        "offset": -0.30, "gain_db": -15} for _, t, _ in TIPS]
+        plan["sfx"].append({"file": os.path.join(fx_dir, "pop.wav"), "at": END_CARD_AT,
+                            "offset": 0.0, "gain_db": -14})
     with open(out, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)
     for c in plan["cues"]:
