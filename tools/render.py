@@ -303,7 +303,8 @@ def build_graph(plan, ass_path, af_chain, audio_only=False, tl=None):
     if tail:
         a += f",apad=pad_dur={tail}"
     sfx = plan.get("sfx", [])
-    if not sfx:
+    music = plan.get("music")
+    if not sfx and not music:
         parts.append(a + "[aout]")
         return ";\n".join(parts)
     # transition sounds: input k+1 is sfx[k]; placed on the edited timeline
@@ -315,7 +316,19 @@ def build_graph(plan, ass_path, af_chain, audio_only=False, tl=None):
         parts.append(f"[{k + 1}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
                      f"volume={fx.get('gain_db', -20)}dB,adelay={ms}|{ms}[fx{k}]")
         mix += f"[fx{k}]"
-    parts.append(f"{mix}amix=inputs={len(sfx) + 1}:normalize=0:duration=first[aout]")
+    if music:
+        # background bed: ducked a few dB by the voice (sidechain), kept out
+        # of the low rumble; its input comes after the sfx inputs
+        m = len(sfx) + 1
+        parts[-1 - len(sfx)] = parts[-1 - len(sfx)].replace("[speech]", "[speech0]")
+        parts.append("[speech0]asplit=2[speech][key]")
+        parts.append(f"[{m}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+                     f"{MUSIC_EQ},volume={music['gain_db']:.2f}dB[bed]")
+        parts.append("[bed][key]sidechaincompress=threshold=0.05:ratio=2.5:attack=40:"
+                     "release=600:knee=4[bedduck]")
+        mix += "[bedduck]"
+    n_in = len(sfx) + 1 + (1 if music else 0)
+    parts.append(f"{mix}amix=inputs={n_in}:normalize=0:duration=first[aout]")
     return ";\n".join(parts)
 
 
@@ -337,6 +350,17 @@ def loudnorm_chain(plan):
             "aresample=48000")
 
 
+# thin out the bed's low end (phones can't play it and it muddies the voice)
+MUSIC_EQ = "highpass=f=110:poles=2,equalizer=f=3000:t=q:w=1:g=-2"
+
+
+def measure_lufs(path, af=None):
+    chain = f"{af},ebur128" if af else "ebur128"
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", path, "-af", chain, "-f", "null", "-"],
+                       capture_output=True, text=True)
+    return float(re.findall(r"I:\s+(-?[\d.]+) LUFS", r.stderr)[-1])
+
+
 def main():
     plan_path, out = sys.argv[1], sys.argv[2]
     preview = "--preview" in sys.argv
@@ -350,8 +374,12 @@ def main():
         with open(plan["ass_copy"], "w", encoding="utf-8") as f:
             f.write(build_ass(plan, tl))
     af = loudnorm_chain(plan)
-    graph = build_graph(plan, ass_path, af, tl=tl)
     fx_inputs = [x for fx in plan.get("sfx", []) for x in ("-i", fx["file"])]
+    if plan.get("music"):
+        mu = plan["music"]
+        mu["gain_db"] = mu["lufs"] - measure_lufs(mu["file"], MUSIC_EQ)
+        fx_inputs += ["-i", mu["file"]]
+    graph = build_graph(plan, ass_path, af, tl=tl)
     enc = (["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"] if preview else
            ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high",
             "-level:v", "4.2", "-g", "60", "-bf", "2"])

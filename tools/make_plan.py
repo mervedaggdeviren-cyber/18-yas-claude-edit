@@ -4,9 +4,10 @@
 Edit decisions live here; the word-level transcript lives in
 edit/transcript_tr.json (Whisper output, proof-read by hand).
 
-Usage: make_plan.py SOURCE.mp4 OUT_plan.json [SFX_DIR]
+Usage: make_plan.py SOURCE.mp4 OUT_plan.json [SFX_DIR [MUSIC.wav]]
   With SFX_DIR (output of make_sfx.py) the plan also places a soft whoosh on
-  every tip card and a soft pop on the end card.
+  every tip card and a soft pop on the end card. With MUSIC.wav (output of
+  make_music.py) it adds a quiet background bed under the voice.
 """
 import json
 import os
@@ -229,6 +230,10 @@ def main():
                         "offset": -0.30, "gain_db": -15} for _, t, _ in TIPS]
         plan["sfx"].append({"file": os.path.join(fx_dir, "pop.wav"), "at": END_CARD_AT,
                             "offset": 0.0, "gain_db": -14})
+    if len(sys.argv) > 4:
+        # voice sits at -14 LUFS; with sidechain ducking the bed ends up
+        # ~17 dB under the voice while she talks
+        plan["music"] = {"file": sys.argv[4], "lufs": -23}
     with open(out, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)
     for seg in segs:
