@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from render import text_width  # noqa: E402
+from render import crop_for_zoom, text_width  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_END = 80.03
@@ -53,6 +53,14 @@ HIGHLIGHTS = ["30 yaş", "yatırım", "alışkanlık", "epilasyon", "yurt dış�
 
 SUB_SIZE = 60
 SUB_MAX_W = 790
+SUB_Y = 1410
+CARD_Y = 300
+
+# Text must never cover the face. edit/face_track.json holds a face box per
+# 0.25 s of source (OpenCV Haar cascade); forehead and chin are estimated from
+# it. Top cards end at TOP_LIMIT, subtitles start at SUB_LIMIT (output px).
+TOP_LIMIT = CARD_Y + (2 * 58 * 1.18 + 56) / 2 + 16
+SUB_LIMIT = SUB_Y - SUB_SIZE * 1.42 / 2 - 16
 
 # Subtitle lines, broken by hand at natural phrase boundaries. Every word must
 # match edit/transcript_tr.json in order; timings come from the transcript.
@@ -114,6 +122,33 @@ def snap_shot(t):
     return t
 
 
+def face_clearance(samples, zoom, y0):
+    """Smallest distance (px) between the face and either text zone."""
+    _, ch, _, _ = crop_for_zoom(zoom, 576, 1024, 0.5, 0.5)
+    k = 1920 / ch
+    worst = 1e9
+    for x, y, w, h in samples:
+        forehead = (y - 0.08 * h - y0) * k
+        chin = (y + 1.10 * h - y0) * k
+        worst = min(worst, forehead - TOP_LIMIT, SUB_LIMIT - chin)
+    return worst
+
+
+def frame_shots(segs, track):
+    """Pick each punch-in's vertical crop (or a smaller zoom) so the face sits
+    between the cards and the subtitles."""
+    for seg in segs:
+        samples = [o["face"] for o in track if o["face"] and seg["s"] <= o["t"] < seg["e"]]
+        if seg["zoom"] == 1.0 or not samples:
+            continue
+        for z in (seg["zoom"], 1.05, 1.0):
+            _, ch, _, _ = crop_for_zoom(z, 576, 1024, 0.5, 0.5)
+            y0 = max(range(0, 1024 - ch + 1), key=lambda v: face_clearance(samples, z, v))
+            if face_clearance(samples, z, y0) >= 0 or z == 1.0:
+                seg["zoom"], seg["y0"] = z, y0
+                break
+
+
 def segments():
     shots = [snap_shot(t) for t in SHOTS]
     cuts = sorted(set([round(a + k / 2, 3) for a, b, k in PAUSES] + shots))
@@ -157,27 +192,34 @@ def cues(words):
 def main():
     source, out = sys.argv[1], sys.argv[2]
     words = json.load(open(os.path.join(ROOT, "edit", "transcript_tr.json"), encoding="utf-8"))
+    track = json.load(open(os.path.join(ROOT, "edit", "face_track.json")))
+    segs = segments()
+    frame_shots(segs, track)
     plan = {
         "source": source,
         "src_w": 576, "src_h": 1024,
-        "focus": [0.45, 0.45],
+        # punch-in shots crop from the lower part of the frame so the face sits
+        # higher, leaving the chest area free for subtitles
+        "focus": [0.45, 0.54],
         "grade": ("colorbalance=rs=-0.03:bs=0.02:rm=-0.035:gm=-0.005:bm=0.025:rh=-0.02:bh=0.015,"
                   "eq=contrast=1.05:brightness=0.01:saturation=0.95:gamma=1.03,"
                   "curves=all='0/0.02 0.5/0.51 0.85/0.84 1/0.97'"),
-        "segments": segments(),
-        "hook": {"end": HOOK_END, "y": 400, "lines": [
-            {"text": "18 yaşında olsaydım", "size": 76},
-            {"text": "kendime vereceğim", "size": 76},
-            {"text": "5 tavsiye", "size": 86, "accent": True}]},
+        "segments": segs,
+        # cards sit above the hairline (y < ~400); her forehead starts lower
+        "hook": {"end": HOOK_END, "y": CARD_Y, "lines": [
+            {"text": "18 yaşında olsaydım", "size": 58},
+            {"text": "kendime vereceğim *5 tavsiye*", "size": 58}]},
+        "tip_card_y": CARD_Y,
         "n_tips": 5,
         "tips": [{"n": n, "at": t, "title": title} for n, t, title in TIPS],
         "outro_at": OUTRO_AT,
-        "end_card": {"at": END_CARD_AT, "y": 400, "lines": [
-            {"text": "18 yaşındaki kendine", "size": 60},
-            {"text": "ne tavsiye verirdin?", "size": 60, "accent": True}]},
+        "end_card": {"at": END_CARD_AT, "y": CARD_Y, "lines": [
+            {"text": "18 yaşındaki kendine", "size": 56},
+            {"text": "ne tavsiye verirdin?", "size": 56, "accent": True}]},
         "highlights": HIGHLIGHTS,
         "sub_size": SUB_SIZE,
-        "sub_y": 1330,
+        # below her chin in every frame (lowest chin measured at y~1310)
+        "sub_y": SUB_Y,
         "cues": cues(words),
     }
     if len(sys.argv) > 3:
@@ -189,8 +231,11 @@ def main():
                             "offset": 0.0, "gain_db": -14})
     with open(out, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=1)
-    for c in plan["cues"]:
-        print(f"{c['s']:6.2f}-{c['e']:6.2f}  {c['text']}")
+    for seg in segs:
+        samples = [o["face"] for o in track if o["face"] and seg["s"] <= o["t"] < seg["e"]]
+        y0 = seg.get("y0", 0)
+        c = face_clearance(samples, seg["zoom"], y0) if samples else float("nan")
+        print(f"{seg['s']:6.2f}-{seg['e']:6.2f} zoom {seg['zoom']:.2f} y0 {y0:3d}  clearance {c:5.0f}px")
 
 
 if __name__ == "__main__":

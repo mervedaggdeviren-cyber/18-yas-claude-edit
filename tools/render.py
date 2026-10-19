@@ -28,8 +28,8 @@ ASS_TO_PIL = 0.81
 # Palette (ASS colours are &HAABBGGRR, alpha 00 = opaque)
 CREAM = "&H00EFF5FA&"      # #FAF5EF
 INK = "&H001A1F2A&"        # #2A1F1A
-ACCENT = "&H004A65B5&"     # #B5654A terracotta
-GOLD = "&H009DD2FF&"       # #FFD29D warm highlight on dark pills
+ACCENT = "&H00007CA6&"     # #A67C00 dark mustard (readable on cream)
+YELLOW = "&H0000B4F4&"     # #F4B400 "koyu sarı" subtitle text
 WHITE = "&H00FFFFFF&"
 DARK = "&H00141414&"
 
@@ -118,18 +118,19 @@ def build_ass(plan, tl):
     hook_end = 0.0
     if hook:
         hook_end = tl.map(hook["end"]) if "end" in hook else hook["dur"]
-        lines = hook["lines"]  # list of (text, size, colour-key)
+        lines = hook["lines"]  # text may mark an accent part as *...*
         heights = [l["size"] * 1.18 for l in lines]
-        box_h = sum(heights) + 70
-        box_w = max(text_width(l["text"], "ExtraBold", l["size"]) for l in lines) + 110
+        box_h = sum(heights) + 56
+        box_w = max(text_width(l["text"].replace("*", ""), "ExtraBold", l["size"]) for l in lines) + 100
         cy = hook.get("y", 420)
         fade = r"\fad(0,250)"
         add(5, 0, hook_end, rf"{{\an7\pos(0,0)\p1\bord0\shad0\1c{CREAM}\1a&H0C&{fade}}}{pill(W/2, cy, box_w, box_h, 34)}")
-        y = cy - box_h / 2 + 35
+        y = cy - box_h / 2 + 28
         for l, lh in zip(lines, heights):
             col = ACCENT if l.get("accent") else INK
+            text = re.sub(r"\*(.+?)\*", lambda m: f"{{\\1c{ACCENT}}}{m.group(1)}{{\\1c{col}}}", l["text"])
             add(6, 0, hook_end,
-                rf"{{\an8\pos({W/2},{y:.0f})\fnInter\b1\fs{l['size']}\1c{col}\bord0\shad0{fade}}}{l['text']}",
+                rf"{{\an8\pos({W/2},{y:.0f})\fnInter\b1\fs{l['size']}\1c{col}\bord0\shad0{fade}}}{text}",
                 "Hook")
             y += lh
 
@@ -160,11 +161,11 @@ def build_ass(plan, tl):
         lines = end_card["lines"]
         sizes = [l["size"] for l in lines]
         box_w = max(text_width(l["text"], "Bold", l["size"]) for l in lines) + 110
-        box_h = sum(s * 1.2 for s in sizes) + 70
+        box_h = sum(s * 1.2 for s in sizes) + 56
         cy = end_card.get("y", 420)
         anim = r"\fad(300,0)"
         add(5, t0, dur + 1, rf"{{\an7\pos(0,0)\p1\bord0\shad0\1c{CREAM}\1a&H0C&{anim}}}{pill(W/2, cy, box_w, box_h, 34)}")
-        y = cy - box_h / 2 + 35
+        y = cy - box_h / 2 + 28
         for l in lines:
             col = ACCENT if l.get("accent") else INK
             weight = r"\b1" if not l.get("light") else r"\b0"
@@ -182,7 +183,7 @@ def build_ass(plan, tl):
         tw = text_width(text, "Bold", fs)
         bh = fs * 1.42
         add(1, t0, t1, rf"{{\an7\pos(0,0)\p1\bord0\shad0\1c{DARK}\1a&H5A&}}{pill(W/2, sub_y, tw + 52, bh, 22)}")
-        add(2, t0, t1, rf"{{\an5\pos({W/2},{sub_y + 2})\fnInter\b1\fs{fs}\1c{WHITE}\bord0\shad0}}{highlight(text, hl_words)}", "Sub")
+        add(2, t0, t1, rf"{{\an5\pos({W/2},{sub_y + 2})\fnInter\b1\fs{fs}\1c{YELLOW}\bord0\shad0}}{highlight(text, hl_words)}", "Sub")
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -218,7 +219,7 @@ def add_progress(add, t0, t1, n, total):
     add(4, t0, t1, rf"{{\an4\pos({x:.0f},{cy + 1})\fnInter\b1\fs34\1c{WHITE}\bord0\shad0\fad(200,0)}}{label}", "Card")
     bx = x + lw + 26
     for i in range(total):
-        col, alpha = (CREAM, "&H00&") if i < n else (WHITE, "&HA0&")
+        col, alpha = (YELLOW, "&H00&") if i < n else (WHITE, "&HA0&")
         cx = bx + i * (seg_w + gap) + seg_w / 2
         add(4, t0, t1, rf"{{\an7\pos(0,0)\p1\bord0\shad0\1c{col}\1a{alpha}\fad(200,0)}}{pill(cx, cy, seg_w, seg_h)}")
 
@@ -229,7 +230,7 @@ def tr_lower(s):
 
 
 def highlight(text, words):
-    """Colour configured keywords/phrases in GOLD."""
+    """Colour configured keywords/phrases in WHITE (the rest of the line is YELLOW)."""
     # A keyword is a word stem: "30 yaş" also covers "30 yaşında", so extend
     # each match to the end of the word and colour whole words only.
     spans = []
@@ -240,7 +241,7 @@ def highlight(text, words):
                 spans.append((m.start(), m.end()))
     out, pos = "", 0
     for a, b in sorted(spans):
-        out += text[pos:a] + f"{{\\1c{GOLD}}}" + text[a:b] + f"{{\\1c{WHITE}}}"
+        out += text[pos:a] + f"{{\\1c{WHITE}}}" + text[a:b] + f"{{\\1c{YELLOW}}}"
         pos = b
     return out + text[pos:]
 
@@ -265,6 +266,7 @@ def build_graph(plan, ass_path, af_chain, audio_only=False, tl=None):
     for i, s in enumerate(segs):
         z = s.get("zoom", 1.0)
         cw, ch, x, y = crop_for_zoom(z, src_w, src_h, fcx, fcy)
+        y = s.get("y0", y)
         d = s["e"] - s["s"]
         if not audio_only:
             parts.append(
